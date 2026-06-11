@@ -1,6 +1,6 @@
 # E-Commerce Microservices Application
 
-A microservices-based e-commerce backend built with **Spring Boot 4.0.6**, **Java 21**, **PostgreSQL 16**, and **Docker**. Demonstrates inter-service communication, circuit breaker resilience, and containerized deployment.
+A microservices-based e-commerce backend built with **Spring Boot 4.0.6**, **Java 21**, **PostgreSQL 16**, and **Docker**. Demonstrates inter-service communication, circuit breaker resilience, JWT authentication, and containerized deployment.
 
 ## Architecture
 
@@ -8,9 +8,10 @@ A microservices-based e-commerce backend built with **Spring Boot 4.0.6**, **Jav
 ┌──────────────────┐         REST          ┌──────────────────┐         REST         ┌─────────────────────┐
 │  Product Service  │ ◄──────────────────── │  Order Service    │ ──────────────────► │ Notification Service │
 │  Port 8083        │  Validate product     │  Port 8084        │  Send confirmation  │  Port 8085           │
-│  PostgreSQL       │  \& check stock        │  PostgreSQL       │  (best-effort)      │  In-memory (logs)    │
-│  (productdb)      │                       │  (orderdb)        │                     │                      │
-│  CRUD APIs        │                       │  + Resilience4j   │                     │  POST /notifications │
+│  PostgreSQL       │  (service-to-service  │  PostgreSQL       │  (best-effort)      │  In-memory (logs)    │
+│  (productdb)      │   JWT auth)           │  (orderdb)        │                     │                      │
+│  + Spring Security│                       │  + Resilience4j   │                     │  POST /notifications │
+│  + JWT Auth       │                       │  + Spring Security│                     │                      │
 └──────────────────┘                       └──────────────────┘                     └─────────────────────┘
                                                     │
                                           ┌─────────▼─────────┐
@@ -23,26 +24,30 @@ A microservices-based e-commerce backend built with **Spring Boot 4.0.6**, **Jav
 
 ## Order Flow
 
-1. Client sends `POST /orders` with product ID, quantity, and customer details
-2. **Order Service** calls **Product Service** (`GET /products/{id}`) to validate the product exists and check stock availability
-3. If Product Service is down, Resilience4j circuit breaker triggers a fallback response instead of crashing
-4. Order Service calculates total price (`unit\_price × quantity`) and saves the order to PostgreSQL
-5. Order Service calls **Notification Service** (`POST /notifications`) to log the order confirmation
-6. If Notification Service is down, the order still succeeds (best-effort notification with try-catch)
+1. Client authenticates via `POST /auth/token` and receives a JWT token
+2. Client sends `POST /orders` with JWT token in Authorization header
+3. **Order Service** validates the JWT token via Spring Security filter
+4. **Order Service** calls **Product Service** (`GET /products/{id}`) with a service-to-service JWT token to validate the product and check stock
+5. If Product Service is down, Resilience4j circuit breaker triggers a fallback response instead of crashing
+6. Order Service calculates total price (`unit_price × quantity`) and saves the order to PostgreSQL
+7. Order Service calls **Notification Service** (`POST /notifications`) to log the order confirmation
+8. If Notification Service is down, the order still succeeds (best-effort notification with try-catch)
+9. The authenticated user is recorded in `created_by` audit field via JPA Auditing + SecurityContext integration
 
 ## Tech Stack
 
-|Technology|Purpose|
-|-|-|
-|Java 21|Language|
-|Spring Boot 4.0.6|Application framework|
-|Spring Data JPA|Database access with Hibernate ORM|
-|PostgreSQL 16|Relational database (Docker)|
-|Resilience4j|Circuit breaker for inter-service fault tolerance|
-|Swagger / springdoc-openapi|Interactive API documentation|
-|JUnit 5 + Mockito|Unit testing|
-|Docker + Docker Compose|Containerization and orchestration|
-|Lombok|Reduce boilerplate code|
+| Technology | Purpose |
+|---|---|
+| Java 21 | Language |
+| Spring Boot 4.0.6 | Application framework |
+| Spring Data JPA | Database access with Hibernate ORM |
+| Spring Security + JWT | Authentication and authorization |
+| PostgreSQL 16 | Relational database (Docker) |
+| Resilience4j | Circuit breaker for inter-service fault tolerance |
+| Swagger / springdoc-openapi | Interactive API documentation |
+| JUnit 5 + Mockito + MockMvc | Unit and integration testing |
+| Docker + Docker Compose | Containerization and orchestration |
+| Lombok | Reduce boilerplate code |
 
 ## Project Structure
 
@@ -60,42 +65,44 @@ service/
 ├── exception/         Custom exceptions + global error handler
 ├── mapper/            Entity ↔ DTO conversion
 ├── client/            Inter-service REST clients (Order Service only)
-└── config/            App configuration, JPA auditing, RestTemplate
+└── config/            Security, JWT, JPA auditing, RestTemplate
 ```
 
 ## API Endpoints
 
 ### Product Service (port 8083)
 
-|Method|URL|Description|
-|-|-|-|
-|POST|`/products`|Create a new product|
-|GET|`/products`|List all active products|
-|GET|`/products/{id}`|Get product by ID|
-|PUT|`/products/{id}`|Update a product|
-|DELETE|`/products/{id}`|Soft delete (sets active=false)|
-|GET|`/products/category/{category}`|Filter products by category|
+| Method | URL | Auth Required | Description |
+|---|---|---|---|
+| POST | `/auth/token` | No | Get JWT token |
+| POST | `/products` | Yes | Create a new product |
+| GET | `/products` | Yes | List all active products |
+| GET | `/products/{id}` | Yes | Get product by ID |
+| PUT | `/products/{id}` | Yes | Update a product |
+| DELETE | `/products/{id}` | Yes | Soft delete (sets active=false) |
+| GET | `/products/category/{category}` | Yes | Filter products by category |
 
 ### Order Service (port 8084)
 
-|Method|URL|Description|
-|-|-|-|
-|POST|`/orders`|Place a new order (validates with Product Service)|
-|GET|`/orders`|List all orders|
-|GET|`/orders/{id}`|Get order by ID|
+| Method | URL | Auth Required | Description |
+|---|---|---|---|
+| POST | `/auth/token` | No | Get JWT token |
+| POST | `/orders` | Yes | Place a new order |
+| GET | `/orders` | Yes | List all orders |
+| GET | `/orders/{id}` | Yes | Get order by ID |
 
 ### Notification Service (port 8085)
 
-|Method|URL|Description|
-|-|-|-|
-|POST|`/notifications`|Receive and log order notification|
+| Method | URL | Auth Required | Description |
+|---|---|---|---|
+| POST | `/notifications` | No | Receive and log order notification |
 
 ## Quick Start
 
 ### Prerequisites
 
-* Docker Desktop
-* Git
+- Docker Desktop
+- Git
 
 ### Run with Docker Compose (recommended)
 
@@ -109,27 +116,33 @@ This starts all four containers (PostgreSQL + 3 services). Both databases (`prod
 
 ### Test the Application
 
-1. **Create a product:**
-
+1. **Get a JWT token:**
 ```bash
-curl -X POST http://localhost:8083/products \\
-  -H "Content-Type: application/json" \\
-  -d '{"name":"Wireless Headphones","description":"Noise cancelling","price":79.99,"stock\_quantity":150,"sku":"WH-1000","category":"Electronics"}'
+curl -X POST http://localhost:8083/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","password":"admin123"}'
 ```
 
-2. **Place an order:**
-
+2. **Create a product (with token):**
 ```bash
-curl -X POST http://localhost:8084/orders \\
-  -H "Content-Type: application/json" \\
-  -d '{"product\_id":1,"quantity":2,"customer\_email":"test@example.com","customer\_name":"John Doe"}'
+curl -X POST http://localhost:8083/products \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
+  -d '{"name":"Wireless Headphones","description":"Noise cancelling","price":79.99,"stock_quantity":150,"sku":"WH-1000","category":"Electronics"}'
 ```
 
-3. **View Swagger UI:**
+3. **Place an order (with token):**
+```bash
+curl -X POST http://localhost:8084/orders \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <YOUR_TOKEN>" \
+  -d '{"product_id":1,"quantity":2,"customer_email":"test@example.com","customer_name":"John Doe"}'
+```
 
-   * Product Service: http://localhost:8083/swagger-ui.html
-   * Order Service: http://localhost:8084/swagger-ui.html
-   * Notification Service: http://localhost:8085/swagger-ui.html
+4. **View Swagger UI:**
+   - Product Service: http://localhost:8083/swagger-ui.html
+   - Order Service: http://localhost:8084/swagger-ui.html
+   - Notification Service: http://localhost:8085/swagger-ui.html
 
 ### Run Locally (without Docker)
 
@@ -137,26 +150,47 @@ Requires Java 21, Maven, and a PostgreSQL instance on port 5555.
 
 ```bash
 # Start each service in separate terminals
-cd product-service \&\& ./mvnw spring-boot:run
-cd order-service \&\& ./mvnw spring-boot:run
-cd notification-service \&\& ./mvnw spring-boot:run
+cd product-service && ./mvnw spring-boot:run
+cd order-service && ./mvnw spring-boot:run
+cd notification-service && ./mvnw spring-boot:run
 ```
 
 ### Run Tests
 
 ```bash
-cd product-service \&\& ./mvnw test      # 4 tests
-cd order-service \&\& ./mvnw test        # 5 tests
-cd notification-service \&\& ./mvnw test  # 2 tests
+cd product-service && ./mvnw test      # 9 tests (4 unit + 5 integration)
+cd order-service && ./mvnw test        # 5 tests
+cd notification-service && ./mvnw test  # 2 tests
 ```
 
-**Total: 11 unit tests across all services**
+**Total: 16 tests across all services**
 
-|Service|Test Class|Tests|What's Covered|
-|-|-|-|-|
-|Product|ProductServiceImplTest|4|Create product, get by ID, not found, soft delete|
-|Order|OrderServiceImplTest|5|Place order, product not found, insufficient stock, get by ID, not found|
-|Notification|NotificationServiceTest|2|Send confirmation, handle null fields|
+| Service | Test Class | Type | Tests | What's Covered |
+|---|---|---|---|---|
+| Product | ProductServiceImplTest | Unit | 4 | Create, get by ID, not found, soft delete |
+| Product | ProductControllerTest | Integration | 5 | POST with auth, GET with auth, GET by ID, 403 without token, public token endpoint |
+| Order | OrderServiceImplTest | Unit | 5 | Place order, product not found, insufficient stock, get by ID, not found |
+| Notification | NotificationServiceTest | Unit | 2 | Send confirmation, handle null fields |
+
+## Security Architecture
+
+### JWT Authentication Flow
+
+```
+1. Client → POST /auth/token (username + password)
+2. Server validates credentials → returns signed JWT token
+3. Client → GET /products (Authorization: Bearer <token>)
+4. JwtAuthenticationFilter extracts and validates the token
+5. Sets SecurityContext with authenticated user
+6. Request proceeds to controller
+7. AuditorAware reads SecurityContext → populates created_by field
+```
+
+### Service-to-Service Authentication
+
+When Order Service calls Product Service, it generates its own JWT token signed with the same secret key and passes it in the Authorization header. Both services share the same JWT secret, enabling mutual trust without an external auth server.
+
+In production, this would be replaced with an OAuth2 Authorization Server (Keycloak, Okta, or AWS Cognito) issuing tokens that all services validate independently.
 
 ## Technical Design Decisions
 
@@ -186,22 +220,21 @@ The Notification Service call is wrapped in a try-catch. A failed notification s
 
 ### Why BaseEntity with JPA Auditing?
 
-Common audit fields (`created\_at`, `created\_by`, `updated\_at`, `updated\_by`) are defined once in `BaseEntity` and inherited by all entities. Spring Data JPA Auditing automatically populates these fields. With OAuth2 security, the `AuditorAware` bean would return the authenticated user from the JWT token.
+Common audit fields (`created_at`, `created_by`, `updated_at`, `updated_by`) are defined once in `BaseEntity` and inherited by all entities. Spring Data JPA Auditing automatically populates these fields. The `AuditorAware` bean reads the authenticated user from `SecurityContextHolder`, so `created_by` reflects the actual JWT user (e.g., "admin") rather than a hardcoded value.
 
 ### Why Docker multi-stage builds?
 
-Stage 1 uses a full Maven+JDK image (\~800MB) to compile the code. Stage 2 copies only the JAR into a slim JRE image (\~300MB). The final production image is 60% smaller, reducing deployment time and attack surface.
+Stage 1 uses a full Maven+JDK image (~800MB) to compile the code. Stage 2 copies only the JAR into a slim JRE image (~300MB). The final production image is 60% smaller, reducing deployment time and attack surface.
 
 ## What I Would Add in Production
 
-* **API Gateway** (Spring Cloud Gateway) for routing, rate limiting, and edge authentication
-* **Service Discovery** (Eureka or Consul) for dynamic service registration
-* **Event-Driven Architecture** (Kafka/SQS) for async inter-service communication
-* **Centralized Logging** (ELK Stack or CloudWatch) for log aggregation
-* **Distributed Tracing** (OpenTelemetry + Jaeger) for end-to-end request tracking
-* **Flyway** for versioned database migrations instead of `ddl-auto=update`
-* **Spring Security + OAuth2/JWT** for authentication and authorization
-* **Integration Tests** with Testcontainers for real database testing
-* **CI/CD Pipeline** (GitHub Actions) for automated build, test, and deployment
-* **Common Module** for shared code (BaseEntity, exceptions) across services
-
+- **OAuth2 Authorization Server** (Keycloak/Cognito) replacing shared JWT secret with proper token issuing
+- **API Gateway** (Spring Cloud Gateway) for routing, rate limiting, and edge authentication
+- **Service Discovery** (Eureka or Consul) for dynamic service registration
+- **Event-Driven Architecture** (Kafka/SQS) for async inter-service communication
+- **Centralized Logging** (ELK Stack or CloudWatch) for log aggregation
+- **Distributed Tracing** (OpenTelemetry + Jaeger) for end-to-end request tracking
+- **Flyway** for versioned database migrations instead of `ddl-auto=update`
+- **Integration Tests** with Testcontainers for real database testing
+- **CI/CD Pipeline** (GitHub Actions) for automated build, test, and deployment
+- **Common Module** for shared code (BaseEntity, exceptions) across services
